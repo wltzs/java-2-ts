@@ -1,0 +1,2277 @@
+<head>
+    <meta charset="utf-8">
+    <title>parser</title>
+    <script>
+        function each(a, cb){
+            for(var i=0;i<a.length;i++){
+                if(cb(a[i], i)===false){
+                    break;
+                }
+            }
+        }
+
+        // input stream
+        function inputStream(pstr){
+            var str = pstr,curIndex = 0,row=1,l = pstr.length||0;
+            function peek(){
+                return str.charAt(curIndex);
+            }
+
+            function next(){
+                var c = str.charAt(curIndex++);
+                if(/\r|\n|\r\n/.test(c)){
+                    row++;
+                }
+                return c;
+            }
+
+            function eof(){
+                return curIndex+1>l;
+            }
+
+            function jumpPeek(off){
+                var i = curIndex+off;
+                i = i>=0?(i<=l?i:l):0;
+                return str.charAt(i);
+            }
+
+            function jump(off){
+                var i = curIndex+off;
+                curIndex = i>=0?(i<=l?i:l):0;
+                return str.charAt(curIndex);
+            }
+
+            function getCurIndex(){
+                return curIndex;
+            }
+
+            function setCurIndex(i){
+                curIndex = i;
+            }
+            return {
+                peek:peek,
+                next:next,
+                jumpPeek:jumpPeek,
+                jump:jump,
+                eof:eof,
+                getCurIndex:getCurIndex,
+                setCurIndex:setCurIndex,
+                row:function(){
+                    return row;
+                },
+                getCode:function(){
+                    return pstr;
+                }
+            };
+        }
+
+
+        function testInput(){
+            var input = inputStream(code);
+            while(!input.eof()){
+                console.log(input.peek());
+                console.log(input.next());
+            }
+        }
+
+
+        //tokenizer
+        function Tokenizer(input){
+            var curTokenStr = '',
+                curIndex = -1,
+                cache = {max:-1};
+            cur = null,
+                pre=null;
+
+
+            function isIdStart(c){
+                return /\_|\$|[a-zA-Z]/.test(c);
+            }
+
+            function isIdPart(c){
+                return /\_|\$|[a-zA-Z]|\d/.test(c);
+            }
+            var originTypes = ' Integer int Byte byte Short short void Boolean boolean char long Long Float float Double double List ArrayList Array String Date ';
+            var keys = ' class Integer null int Byte byte Short short throw throws transient implements volatile this instanceof protected synchronized native interface import abstract assert const default goto extends enum void Boolean boolean char long Long Float float Double double List final ArrayList private package  static  package public return if else while for break continue case switch try catch Array String Date in new with ';
+
+            function isOriginType(t){
+                return originTypes.indexOf(' '+t+' ')>-1;
+            }
+            function isKeyword(t){
+                return keys.indexOf(' '+t+' ')>-1;
+            }
+
+            function isBoolean(t){
+                return t === 'true' || t==='false';
+            }
+
+            function isPunc(c){
+                return ',[]{}();.:\\=\'\"+-*/%!&|<>?@'.indexOf(c)>-1;
+            }
+
+            function isStringMark(mark){
+                var cur = input.peek(),
+                    pre1 = input.jumpPeek(-1),
+                    pre2 = input.jumpPeek(-2);
+                if(mark){
+                    return (mark===cur)&&((pre1!='\\')||(pre1=='\\'&&pre2==='\\'));
+                }else{
+                    return (/\'|\"/.test(cur))&&((pre1!='\\')||(pre1=='\\'&&pre2==='\\'));
+                }
+
+            }
+
+            function readString(){
+                if(isStringMark()){
+                    var mark = input.next();
+                    curTokenStr = '';
+                    while(!isStringMark(mark)&&!input.eof()){
+                        curTokenStr += input.next();
+                    }
+                    input.next();
+                }
+                return curTokenStr;
+            }
+
+            function isNum(){
+                return /\d/.test(input.peek());
+            }
+
+            function isRegMark(){
+                return input.peek()==="/"&&(input.jumpPeek(-1)!='\\');
+            }
+
+            function readReg(){
+                var scope = [];
+                if(isRegMark()){
+                    input.next();
+                    curTokenStr = '';
+                    while(!isRegMark()&&!input.eof()){
+                        curTokenStr += input.next();
+                    }
+                    input.next();
+                    while(input.peek()==='g'||input.peek()==='i'){
+                        scope.push(input.next());
+                    }
+                }
+                return {t:curTokenStr,type:'reg',r:input.row(),scope:scope};
+            }
+
+            function readNum(){
+                if(isNum()){
+                    curTokenStr = input.next();
+                    var hasDot = false;
+                    while(isNum()||(input.peek()==='.'&&!hasDot)){
+                        if(input.peek()==='.'){
+                            hasDot = true;
+                        }
+                        curTokenStr +=input.next();
+
+                    }
+                    return curTokenStr;
+                }
+            }
+
+            function readId(){
+                if(isIdStart(input.peek())){
+                    curTokenStr = input.next();
+                    while(isIdPart(input.peek())){
+                        curTokenStr += input.next();
+                    }
+                }
+                return curTokenStr;
+            }
+            function isBlank(){
+                return /\s/.test(input.peek());
+            }
+
+            // skip blank
+            function skipBlank(){
+                var cur = '';
+                var reBack = false;
+                while(isBlank()){
+                    cur = input.next();
+                    if(!reBack && /\r|\n|\r\n/.test(cur)){
+                        reBack = true;
+                        //console.log('has return back!');
+                    }
+                }
+                return reBack;
+            }
+
+            //skip single
+            function skipSingleComment(){
+                var res = [];
+                while(!/\r|\n|\r\n/.test(input.peek())&&!input.eof()){
+                    res.push(input.next());
+                }
+                input.next();
+                return res.join('');
+            }
+
+            //skip multiline notions
+            function skipMultiComment(){
+                var res =['/'];
+                input.next();
+                while(!(input.peek()==='/'&&input.jumpPeek(-1)==='*')){
+                    res.push(input.next());
+                }
+                input.next();
+                res.push('/');
+                return res.join('');
+            }
+
+            //is operator start
+            function isOpStart(c){
+                return /&|\||\!|\?|\+|\-|\*|\/|%|<|>|\=/.test(c);
+            }
+
+            function readNotation(){
+                if(input.peek()==='@'){
+                    input.next();
+                    return '@'+readId();
+                }
+                return '@';
+            }
+
+            //next token
+            function read(clear,pIndex){
+                if(cache[pIndex]){
+                    pre = cur;
+                    cur = cache[pIndex];
+                }else if(pIndex<cache.max){
+                    return {type:null};
+                }else{
+                    var hasReturnBack = skipBlank();
+                    pre = cur;
+                    if(isIdStart(input.peek())){
+                        curTokenStr = readId();
+                        if(isOriginType(curTokenStr)){
+                            cur = {t:curTokenStr,type:'originType',r:input.row()};
+                        }else if(isBoolean(curTokenStr)){
+                            cur = {t:curTokenStr,type:'boolean',r:input.row()};
+                        }else if(curTokenStr==='null'){
+                            cur = {t:curTokenStr,type:'null',r:input.row()};
+                        }else if(isKeyword(curTokenStr)){
+                            cur = {t:curTokenStr,type:'keyword',r:input.row()};
+                        }else{
+                            cur = {t:curTokenStr,type:'id',r:input.row()};
+                        }
+                    }else if(isPunc(input.peek())){
+                        if(isStringMark()){
+                            curTokenStr = readString();
+                            cur = {t:curTokenStr,type:'string',r:input.row()};
+
+                        }else if(isRegMark()){
+                            var next = input.jumpPeek(1);
+                            if(next=='='){
+                                input.next();
+                                input.next();
+                                cur = {t:'/=',type:'op',r:input.row()};
+                            }else if(next=='/'){
+
+                                //return read(clear,pIndex);
+                                cur = {t:skipSingleComment(),type:'comment',preLine:!hasReturnBack,r:input.row()};
+                            }else if(next=='*'){
+                                //return read(clear,pIndex);
+                                cur = {t:skipMultiComment(),type:'comment',preLine:!hasReturnBack,r:input.row()};
+                            }else if(pre&&(pre.t===')'||pre.t===']'||pre.type==='id'||pre.type==='num')){
+                                curTokenStr = input.next();
+                                cur = {t:curTokenStr,type:'punc',r:input.row()};
+                            }else{
+                                cur = readReg();
+                            }
+
+                        }else if(isOpStart(input.peek())){
+
+                            if(/&|\|/.test(input.peek())){
+                                var punc1 = input.peek(),
+                                    nextChar = input.jumpPeek(1);
+                                if(nextChar===punc1){
+                                    cur = {t:punc1+punc1,type:'op-bool',r:input.row()};
+                                    input.jump(2);
+                                }else{
+                                    cur = {t:punc1,type:'op-bit',r:input.row()};
+                                    input.next();
+                                }
+
+                            }else if('!'===input.peek()){
+                                var nextChar1 = input.jumpPeek(1);
+                                if(nextChar1 === '='){
+                                    cur = {t:'!=',type:'op-bool',r:input.row()};
+                                    input.jump(2);
+                                }else{
+                                    cur = {t:'!',type:'op-bool',r:input.row()};
+                                    input.next();
+                                }
+                            }else if(/\=/.test(input.peek())){
+                                var nextChar1 = input.jumpPeek(1);
+                                if(nextChar1 === '='){
+                                    cur = {t:'==',type:'op-bool',r:input.row()};
+                                    input.jump(2);
+                                }else{
+                                    cur = {t:'=',type:'op-set',r:input.row()};
+                                    input.next();
+                                }
+                            }else if(/\<|\>/.test(input.peek())){
+
+                                if(input.jumpPeek(1) === '='){
+                                    cur = {t:input.peek()+'=',type:'op-bool',r:input.row()};
+                                    input.jump(2);
+                                }else{
+                                    cur = {t:input.peek(),type:'op-bool',r:input.row()};
+                                    input.next();
+                                }
+
+                            }else if(/\+|\-|\*|\/|%/.test(input.peek())){
+                                var punc1 = input.peek(),
+                                    nextChar = input.jumpPeek(1);
+                                if(nextChar==='='){
+                                    cur = {t:punc1+nextChar,type:'op-math_set',r:input.row()};
+                                    input.jump(2);
+                                }else{
+                                    var dop = punc1+nextChar;
+                                    if(dop === '++'||dop==='--'){
+                                        cur = {t:dop,type:'op-math',r:input.row()};
+                                        input.jump(2);
+                                    }else{
+                                        cur = {t:punc1,type:'op-math',r:input.row()};
+                                        input.next();
+                                    }
+                                }
+
+                            }else{
+                                curTokenStr = input.next();
+                                cur = {t:curTokenStr,type:'punc',r:input.row()};
+                            }
+
+                        }else if(input.peek()==='@'){
+                            curTokenStr = readNotation();
+                            cur = {t:curTokenStr,type:'notation',r:input.row()};
+                        }else{
+                            curTokenStr = input.next();
+                            cur = {t:curTokenStr,type:'punc',r:input.row()};
+                        }
+                    }else if(isNum()){
+                        cur = {t:readNum(),type:'num',r:input.row()};
+                    }
+                }
+
+                if(pIndex>cache.max){
+                    cache.max = pIndex;
+                }
+                cache[pIndex] = cur;
+                clear&&(curIndex=pIndex);
+                clear&&clearCache(pIndex);
+                return cur;
+            }
+
+            function peek(){
+                var t = read(false,curIndex+1);
+                return t;
+            }
+
+            function jumpPeek(off){
+                var t  = {};
+                for(var i = 1;i<=off;i++){
+                    t = read(false,curIndex+i);
+                }
+                return t;
+            }
+
+            function clearCache(d){
+                for(var i in cache){
+                    if(d>=(+i)){
+                        delete cache[i];
+                    }
+                }
+            }
+
+            function next(){
+                var t = read(true,curIndex+1);
+                clearCache(curIndex);
+                return t;
+            }
+
+            function jump(off){
+                var t  = {};
+                for(var i = 0;i<off;i++){
+                    t = read(true,curIndex+1);
+                }
+                clearCache(curIndex);
+                return t;
+
+            }
+
+            return {
+                peek:peek,
+                next:next,
+                jump:jump,
+                jumpPeek: jumpPeek,
+                eof:function(){
+                    return input.eof();
+                },
+                index:function(){
+                    return curIndex;
+                },
+                getCode(){
+                    return input.getCode();
+                }
+            };
+        }
+
+        function testTokenzer(code){
+            var d = new Date();
+            var tk = Tokenizer(inputStream(code))
+            while(!tk.eof()){
+                console.log(tk.next());
+            }
+            console.log(new Date().getTime()-d.getTime());
+        }
+
+
+
+
+
+
+
+
+        function Parser(tokenizer){
+            var tk = tokenizer;
+            var className = '';
+            var classType = '';
+            /*function parseExpression(){
+                var t = tk.peek(),t1 = tk.peek(2);
+                if(t.type==='num'){
+                    tk.next();
+                    return t;
+                }
+
+            }
+            function expect(t){
+                var n = tokenizer.peek();
+                if(t===n.t){
+                    return true;
+                }else{
+                    return false;
+                }
+            }
+            function err(t){
+                throw 'un expected token :'+t.t;
+            }
+
+            function parseDeclaration(){
+                tokenizer.next();
+                var res = {type:'declaration',item:[]};
+
+                while(tokenizer.peek().t!==';'&&!tokenizer.eof()){
+                    var curT = tokenizer.next(),cur = {name:curT.t};
+                    op = tokenizer.peek();
+                    if(op.t==='='&&op.type==='op-set'){
+                        tokenizer.next();
+                        cur.init = parseExpression();
+                    }
+                    res.item.push(cur);
+
+                    n = tokenizer.peek();
+                    if(n.t===','){
+                        tokenizer.next();
+                        continue;
+                    }else if(n.t===';'){
+                        tokenizer.next();
+                        break;
+                    }else if(n.r!==curT.r){
+                        break;
+                    }else{
+                        err(n);
+                    }
+                }
+                return res;
+            }
+
+            function parseCommaExp(end){
+                var res = [];
+                do{
+                    res.push(parseExpression());
+                }while(n.t!==end);
+            }
+
+            function parseFuncDefine(){
+                tokenizer.next();
+                var res = {type:'funcDefine'};
+                var n = tk.next();
+                if(n.type==='id'){
+                    res.name=n.t;
+                }else if(n.type==='punc'&&n.t==='('){
+                    res.args = parseCommaExp();
+                }
+                n = tk.peek();
+                if(n.type==='punc'&&n.t==='{'){
+                    res.body = parseBlock();
+                }
+
+                return res;
+            }*/
+
+            function isId(type){
+                return type==='id' || type==='keyword' || type==='originType';
+            }
+            function checkForward(i){
+                if(tk.index()<=i){
+                    var t = tk.peek();
+                    throwError('',t);
+                }
+            }
+
+            function parseArrayAccess(o){
+                var res = o||{};
+                res.type = 'arrayAccess';
+                tk.next();
+                res.expression = parseExpressionLst(function(e){
+                    return e === ']' || e === ';';
+                });
+                jumpToken(']');
+                return res;
+            }
+
+            function parseObjAccess(noCall){
+                var path = [];
+                var cur = tk.peek();
+                var pIndex = tk.index();
+                while(isId(cur.type)||cur.type==='string'){
+                    pIndex = tk.index();
+                    path.push(cur.type==="string"?'\''+cur.t+'\'':cur.t);
+                    tk.next();
+                    cur = tk.peek();
+                    if(cur.type==='punc'&&cur.t==='.'){
+                        tk.next();
+                        cur = tk.peek();
+                    }else{
+                        break;
+                    }
+                    checkForward(pIndex);
+                }
+                var res;
+                cur = tk.peek();
+                if(cur.type==='punc' && cur.t==='['){
+                    res = parseArrayAccess({path: path.join('.')});
+                    cur = tk.peek();
+                    if(cur.t ==='.'){
+                        tk.next();
+                        res.next = parseObjAccess();
+                    }
+                }
+                if(!noCall){
+                    cur = tk.peek();
+                    if(cur.t ==='('){
+                        res = parseCall({funcName: path.join('.')});
+                        cur = tk.peek();
+                        if(cur.t ==='.'){
+                            tk.next();
+                            res.next = parseObjAccess();
+                        }else if(cur.t ==='['){
+                            res.next = parseObjAccess();
+                        }
+                    }
+                }
+
+                if(!res){
+                    res = { type:'objAccess',path:path.join('.'), length: path.length};
+                }
+
+                return res;
+            }
+
+            function parseNamePath(){
+                var path = [];
+                var cur = tk.peek();
+                var pIndex = tk.index();
+                while(isId(cur.type) || cur.t==='*'){
+                    pIndex = tk.index();
+                    path.push(cur.t);
+                    tk.next();
+                    cur = tk.peek();
+                    if(cur.type==='punc'&&cur.t==='.'){
+                        tk.next();
+                        cur = tk.peek();
+                    }else{
+                        break;
+                    }
+                    checkForward(pIndex);
+                }
+                return path.join('.');
+            }
+
+            function parsePackage(k){
+                var res = {type:'package'};
+                tk.next();
+                res.path = parseNamePath();
+                if(tk.peek().t===';'){
+                    tk.next();
+                }
+                return res;
+            }
+
+            function parseImport(){
+                var res = {type:'import'};
+                tk.next();
+                res.path = parseNamePath();
+                if(tk.peek().t===';'){
+                    tk.next();
+                }
+                return res;
+            }
+
+            function parseClass(res){
+                var cur = tk.next();
+                res = res||{};
+                res.type = cur.t;
+                classType = cur.t;
+                cur = tk.peek();
+                if(cur.type==='id'){
+                    res.name = cur.t;
+                    className = cur.t;
+                    tk.next();
+                }
+                var i = 2;
+                while(i-->0){
+                    cur = tk.peek();
+                    if(cur.t === 'extends'){
+                        res.extends = parseImplements(cur.t);
+                    }
+                    cur = tk.peek();
+                    if(cur.t === 'implements'){
+                        res.implements = parseImplements(cur.t);
+                    }
+                    cur = tk.peek();
+                }
+
+                cur = tk.peek();
+                if(cur.type==='punc'&&cur.t==='{'){
+                    res.body = parseClsBody();
+                }else{
+                    throwError('代码错误请检查！:类定义错误。');
+                }
+                return res;
+            }
+
+            function parseImplements(type){
+                var res = {type:type};
+                tk.next();
+                var cur = tk.peek();
+                var dataTypes = [];
+                var pIndex = tk.index();
+                while(cur.type === 'id'){
+                    pIndex = tk.index();
+                    var c = {};
+                    c.dataType  = cur.t;
+                    tk.next();
+                    cur = tk.peek();
+                    if(cur.t==='<'){
+                        c.isGenericity = true;
+                        c.genericity = parseGenericity()
+                    }else if(cur.t === '['){
+                        c.isArray = true;
+                        tk.next();
+                        cur = tk.peek();
+                        if(cur.t === ']'){
+                            tk.next();
+                        }else{
+                            throwError('need ]');
+                        }
+                    }
+                    dataTypes.push(c);
+                    cur = tk.peek();
+                    if(cur.t===','){
+                        tk.next();
+                    }else{
+                        break;
+                    }
+                    cur = tk.peek();
+                    checkForward(pIndex);
+                }
+                res.dataTypes = dataTypes;
+                return res;
+            }
+
+            function isDataType(type){
+                return type === 'originType' || type === 'id';
+            }
+
+            function jumpSemicolon(){
+                if(tk.peek().t === ';'){
+                    tk.next();
+                }
+            }
+            function parseClsStatement(){
+                var res = {};
+                var cur = tk.peek();
+                if(cur.type === 'notation'){
+                    res = parseNotation();
+                }else if(cur.type==='comment'){
+                    res={type:'comment',content:cur.t,preLine:cur.preLine};
+                    tk.next();
+                }else{
+                    if(cur.t==='public'||cur.t==='private'||cur.t==='protected'){
+                        res.accessRisc = cur.t;
+                        tk.next();
+                    }
+                    cur = tk.peek();
+                    if(cur.t === 'final'){
+                        res.isFinal = true;
+                        tk.next();
+                        cur = tk.peek();
+                    }
+                    cur = tk.peek();
+                    if(cur.t === 'volatile'){
+                        res.isVolatile = true;
+                        tk.next();
+                        cur = tk.peek();
+                    }
+                    cur = tk.peek();
+                    if(cur.t === 'static'){
+                        res.isStatic = true;
+                        tk.next();
+                    }
+                    cur = tk.peek();
+                    if(cur.t === 'abstract'){
+                        res.isAbstract = true;
+                        tk.next();
+                    }
+                    cur = tk.peek();
+                    if(cur.t === '{' && res.isStatic){
+                        res = {
+                            type:'staticBlock',
+                            body: parseBlock()
+                        }
+                    } else {
+                        cur = tk.peek();
+                        if(cur.t === 'final'){
+                            res.isFinal = true;
+                            tk.next();
+                        }
+                        cur = tk.peek();
+
+                        // 类型
+                        if(isDataType(cur.type)){
+                            res.dataType  = parseObjAccess(true).path;// cur.t;
+                            //tk.next();
+                            cur = tk.peek();
+                            if(cur.t==='<'){
+                                res.isGenericity = true;
+                                res.genericity = parseGenericity()
+                            }else if(cur.t === '['){
+                                res.isArray = true;
+                                tk.next();
+                                cur = tk.peek();
+                                if(cur.t === ']'){
+                                    tk.next();
+                                }else{
+                                    throwError('need ]');
+                                }
+                            }
+                        }else if(cur.t === 'class'||cur.t === 'enum'){
+                            res = parseClass(res);
+                            return res;
+                        }else{
+                            throwError('代码错误请检查！:类型定义错误。');
+                        }
+
+                        // name
+                        cur = tk.peek();
+                        if(cur.type === 'id'){
+                            res.name = cur.t;
+                            tk.next();
+                            cur = tk.peek();
+                            if(cur.t === ';'){
+                                res.type = 'attr';
+                                tk.next();
+                            }else if(cur.t === '='){
+                                res.type = 'attr';
+                                tk.next();
+                                res.initVal = parseExpressionLst(function(t){return t===';';});
+                                jumpSemicolon();
+                            }else if(cur.t === '('){
+                                res.type = 'func';
+                                res.paras = parseDefineParas();
+                                cur = tk.peek();
+                                if(cur.t==='throws'){
+                                    res.exceptions = parseExceptions();
+                                }
+                                cur = tk.peek();
+                                if(cur.t === '{'){
+                                    res.body = parseBlock();
+                                }else if(cur.t === ';') { // 抽象方法
+                                    tk.next();
+                                }
+                            }
+                        }else if(cur.t === '(' && res.dataType === className){
+                            res.type = 'constructor';
+                            res.paras = parseDefineParas();
+                            cur = tk.peek();
+                            if(cur.t === '{'){
+                                res.body = parseBlock();
+                            }
+                        }else if(cur.t === '(' && isEnumClass()){
+                            res.type = 'enumValue';
+                            res.name = res.dataType;
+                            res.paras = parseParas();
+                            cur = tk.peek();
+                            if(cur.t === '{'){
+                                res.body = parseClsBody();
+                            }
+                            jumpTokens(',');
+                            jumpTokens(';');
+                        }else{
+                            throwError('代码错误请检查！:类定义错误。');
+                        }
+                    }
+                }
+                return res;
+            }
+
+            function isEnumClass(){
+                return classType === 'enum';
+            }
+
+            function parseExceptions(){
+                var res = {type:'exceptionThrow'};
+                tk.next();
+                var a = [];
+                var cur = tk.peek();
+                var pIndex = tk.index();
+                while(cur.t!=='{'){
+                    pIndex = tk.index();
+                    a.push(parseObjAccess());
+                    cur = tk.peek();
+                    if(cur.t === ','){
+                        tk.next();
+                        cur = tk.peek();
+                        if(cur.t==='{'){
+                            throwError('代码错误请检查！:异常列表多了一个\',\'。');
+                        }
+                    }
+                    checkForward(pIndex);
+                }
+                res.lst = a;
+                return res;
+            }
+
+            function parseDefineParas(){
+                var res = [];
+                tk.next();
+                var cur = tk.peek();
+                var pIndex = tk.index();
+                while(cur.t!==')'){
+                    pIndex = tk.index();
+                    res.push(parseDefinePara());
+                    cur = tk.peek();
+                    if(cur.t === ','){
+                        tk.next();
+                        cur = tk.peek();
+                        if(cur.t===')'){
+                            throwError('代码错误请检查！:参数列表多了一个\',\'。');
+                        }
+                    }
+                    checkForward(pIndex);
+                }
+                tk.next();
+                return res;
+            }
+
+            // 方法参数定义
+            function parseDefinePara(){
+                var  res = {};
+                var cur = tk.peek();
+                if(cur.t==='final'){
+                    res.isFinal = true;
+                    tk.next();
+                }
+                cur = tk.peek();
+                if(isDataType(cur.type)){
+                    res.dataType = cur.t;
+                    tk.next();
+                    cur = tk.peek();
+                    if(cur.t==='<'){
+                        res.isGenericity = true;
+                        res.genericity = parseGenericity()
+                    }else if(cur.t === '['){
+                        res.isArray = true;
+                        tk.next();
+                        cur = tk.peek();
+                        if(cur.t === ']'){
+                            tk.next();
+                        }else{
+                            throwError('need ]');
+                        }
+                    }
+                }
+
+                cur = tk.peek();
+                if(cur.type === 'id'){
+                    res.name = cur.t;
+                    tk.next();
+                }
+                return res;
+            }
+
+            function parseBlock(){
+                var res = [];
+                tk.next();
+                var pIndex = tk.index();
+                while(tk.peek().t !== '}'){
+                    pIndex = tk.index();
+                    res.push(parseStatement());
+                    checkForward(pIndex);
+                }
+                tk.next();
+                return res;
+            }
+
+            function parseStatement(){
+                var cur = tk.peek();
+                var res;
+                if(cur.t === 'if'){
+                    res = parseIf();
+                }else if(cur.type==='comment'){
+                    res = {type:'comment',content:cur.t,preLine:cur.preLine};
+                    tk.next();
+                }else if(cur.t === 'final'){
+                    tk.next();
+                    res = parseVariableDefine(true);
+                }else if(cur.type === 'id'){
+                    var n1 = tk.jumpPeek(2);
+                    var code = cur.t.charCodeAt(0);
+                    if(n1.type === 'id'){
+                        res = parseVariableDefine(false);
+                    }else if(n1.t==='<'&&(code<91&&code>64)){
+                        res = parseVariableDefine(false);
+                    }else{
+                        res = parseObjAccess();
+                        cur = tk.peek();
+                        if(cur.t === '='){
+                            res = {left: res,type:'assign', right: parseAssign()};
+                        }else if(res.type==='objAccess'&&cur.type === 'id'){
+                            res = {dataType:res.path,type:'varDefine', vars: parseVars()};
+                        }else if(cur.t!==';'){
+                            tk.next();
+                            res = {type:'expression',lst:[res,{type:'op',value:cur.t}].concat(parseExpressionLst(function(t){
+                                    return t === ';';
+                                }))};
+                        }
+                    }
+                }else if(cur.type === 'originType'){
+                    res = parseVariableDefine(false);
+                }else if(cur.t === 'new'){
+                    res = parseNew();
+                }else if(cur.t === 'return'){
+                    res = parseReturn();
+                }else if(cur.t === 'try'){
+                    res = parseTry();
+                }else if(cur.t === 'continue'){
+                    res = parseSingleToken('continue');
+                }else if(cur.t === 'break'){
+                    res = parseSingleToken('break');
+                }else if(cur.t === 'this'){
+                    res = parseObjAccess();
+                    cur = tk.peek();
+                    if(cur.t === '='){
+                        res = {left: res,type:'assign', right: parseAssign()};
+                    }else if(cur.t!==';'){
+                        tk.next();
+                        res = {type:'expression',lst:[res,{type:'op',value:cur.t}].concat(parseExpressionLst(function(t){
+                                return t === ';';
+                            }))};
+                    }
+                }else if(cur.t === 'throw'){
+                    res = parseThrow();
+                }else if(cur.t === 'for'){
+                    res = parseFor();
+                }else if(cur.t === 'while'){
+                    res = parseWhile();
+                }else if(cur.t === 'do'){
+                    res = parseFor();
+                }
+                cur = tk.peek();
+                if(cur.t===';'){
+                    tk.next();
+                }
+                return res;
+            }
+
+            function parseWhile(){
+                var res = {type:'while'};
+                tk.next();
+                res.condition = parseCondition();
+                var cur = tk.peek();
+                if(cur.t === '{'){
+                    res.body = parseBlock();
+                }else{
+                    res.body = parseStatement();
+                }
+                return res;
+            }
+
+            function parseThrow(){
+                var res = {type: 'throw'};
+                tk.next();
+                res.exception = parseNew();
+                return res;
+            }
+            function parseSingleToken(t){
+                tk.next();
+                return {type:t};
+            }
+
+            function parseReturn(){
+                var res = {type:'return'};
+                tk.next();
+                var cur = tk.peek();
+                if(cur.t===';'){
+                    res.value = null;
+                }else{
+                    res.value = parseExpressionLst(function(t){return t===';'});
+                    jumpSemicolon();
+                }
+                return res;
+            }
+            function parseTry(){
+                var res = {type:'try'};
+                tk.next();
+                var cur = tk.peek();
+                if(cur.t==='{'){
+                    res.body = parseBlock();
+                }
+                var cts = [];
+                while(true){
+                    cur = tk.peek();
+                    if(cur.t === 'catch'){
+                        tk.next();
+                        var ct = {type:'catch'};
+                        cur = tk.peek();
+                        if(cur.t==='('){
+                            ct.paras = parseDefineParas();
+                        }
+                        cur = tk.peek();
+                        if(cur.t==='{'){
+                            ct.body = parseBlock();
+                        }
+                        cts.push(ct);
+                    }else if(cur.t === 'finally'){
+                        tk.next();
+                        var fy = {type:'finally'};
+                        cur = tk.peek();
+                        if(cur.t==='{'){
+                            fy.body = parseBlock();
+                        }
+                        res.finally = fy;
+                    }else{
+                        break;
+                    }
+                }
+                res.catch = cts;
+                return res;
+            }
+
+            function parseNew(){
+                tk.next();
+                var cur = tk.peek();
+                var res = {type: 'new'};
+                if(isDataType(cur.type)){
+                    res.dataType = parseObjAccess(true).path;// cur.t;
+                    //tk.next();
+                    cur = tk.peek();
+                    if(cur.t==='<'){
+                        res.isGenericity = true;
+                        res.genericity = parseGenericity()
+                    }else if(cur.t === '['){
+                        res.isArray = true;
+                        tk.next();
+                        cur = tk.peek();
+                        if(cur.t === ']'){
+                            tk.next();
+                        }else{
+                            throwError('need ]');
+                        }
+                    }
+                }
+                cur = tk.peek();
+                if(cur.t==='('){
+                    res.paras = parseParas();
+                }
+                cur = tk.peek();
+                if(cur.t === '.'){
+                    tk.next();
+                    res.next = parseObjAccess();
+                }
+                cur = tk.peek();
+                if(cur.t === '{'){
+                    res.body = parseClsBody();
+                }
+                return res;
+            }
+
+            function parseAssign(){
+                var cur = tk.peek();
+                if(cur.t === '='){
+                    tk.next();
+                }else{
+                    throwError();
+                }
+                return parseExpressionLst(function(t){return t===';';});
+            }
+            function expect(t){
+                return tk.peek().t === t;
+            }
+
+            function parseFor(){
+                tk.next();
+                var cur = tk.peek();
+                if(!expect('(')){
+                    throwError('need a (');
+                }else{
+                    tk.next();
+                }
+                var res;
+                if(isNormalFor()){
+                    res = {type:'for'};
+                    res.step1 = parseStatement();
+                    res.step2 = parseExpressionLst(function (t) {
+                        return t===';';
+                    });
+                    jumpToken(';');
+                    res.step3 = parseExpressionLst(function (t) {
+                        return t===')';
+                    });
+                    if(expect(')')){
+                        tk.next();
+                    }else{
+                        throwError('need a )');
+                    }
+                    if(expect('{')){
+                        res.body = parseBlock();
+                    }else{
+                        res.body = parseStatement();
+                    }
+                } else {
+                    res = parseForEach();
+                }
+
+                return res;
+            }
+
+            function jumpToken(t){
+                if(tk.peek().t === t){
+                    tk.next();
+                }
+            }
+            function jumpTokens(t){
+                var cur = tk.peek();
+                while(cur.t === t){
+                    tk.next();
+                    cur = tk.peek();
+                }
+            }
+
+            function isNormalFor(){
+                var cur = tk.peek();
+                var res = false;
+                var bN = 0;
+                var index = 1;
+                while(cur.t !== ')'||(cur.t===')' && bN > 0)){
+                    if(cur.t===';'){
+                        res = true;
+                        break;
+                    }else if(cur.t==='('){
+                        bN++;
+                    }else if(cur.t===')'){
+                        bN--;
+                    }
+                    cur = tk.jumpPeek(++index);
+
+                }
+                return res;
+            }
+            function parseForEach1(){
+                var res = {};
+                var item = {};
+                var cur = tk.peek();
+                var index = 1;
+                if(cur.t ==='final'){
+                    item.isFinal = true;
+                    cur = tk.jumpPeek(++index);
+                }
+                if(isDataType(cur.type)){
+                    item.dataType = cur.t;
+                    cur = tk.jumpPeek(++index);
+                }
+                if(cur.type === 'id'){
+                    item.name = cur.t;
+                    cur = tk.jumpPeek(++index);
+                }
+                if(cur.t===':'){
+                    tk.jump(index);
+                    res.data = valExpression();
+                    res.item = item;
+                    peekAndJump(')');
+                    cur = tk.peek();
+                    if(cur.t === '{'){
+                        res.body = parseBlock();
+                    }
+                    res.type = 'forEach';
+                    return res;
+                }else{
+                    return false;
+                }
+            }
+            function parseForEach(){
+                var res = {};
+                var cur = tk.peek();
+                var item;
+                if(cur.t === 'final'){
+                    tk.next();
+                    item = parseSingleVarDefine(true, ':');
+                }else{
+                    item = parseSingleVarDefine(false, ':');
+                }
+                item.name = item.vars[0].name;
+                cur = tk.peek();
+                if(cur.t===':'){
+                    tk.next();
+                    res.data = valExpression();
+                    res.item = item;
+                    peekAndJump(')');
+                    cur = tk.peek();
+                    if(cur.t === '{'){
+                        res.body = parseBlock();
+                    }
+                    res.type = 'forEach';
+                    return res;
+                }else{
+                    return false;
+                }
+            }
+
+            function peekAndJump(t){
+                if(tk.peek().t === t){
+                    tk.next();
+                    return true;
+                }else{
+                    return false;
+                }
+            }
+
+            function parseSingleVarDefine(isFinal, stopToken){
+                var isFinal = !!isFinal;
+                var res = { isFinal: isFinal, type: 'varDefine'};
+                var cur = tk.peek();
+                if(isDataType(cur.type)){
+                    res.dataType = parseObjAccess(true).path;// cur.t;
+                    //tk.next();
+                }
+                cur = tk.peek();
+                if(cur.t==='<'){
+                    res.isGenericity = true;
+                    res.genericity = parseGenericity();
+                }
+                cur = tk.peek();
+                if(cur.t==='['){
+                    tk.next();
+                    res.isArray = true;
+                    tk.next();
+                }
+                res.vars = parseVars(stopToken);
+                return res;
+            }
+
+            // bolck内变量定义
+            function parseVariableDefine(isFinal){
+                var isFinal = !!isFinal;
+                var res = { isFinal: isFinal, type: 'varDefine'};
+                var cur = tk.peek();
+                if(isDataType(cur.type)){
+                    res.dataType = parseObjAccess(true).path;// cur.t;
+                    //tk.next();
+                }
+                cur = tk.peek();
+                if(cur.t==='<'){
+                    res.isGenericity = true;
+                    res.genericity = parseGenericity();
+                }
+                cur = tk.peek();
+                if(cur.t==='['){
+                    tk.next();
+                    res.isArray = true;
+                    tk.next();
+                }
+                res.vars = parseVars();
+                return res;
+            }
+
+            function parseVars(stopToken){
+                stopToken = stopToken || ';';
+                var vars = [];
+                var cur = tk.peek();
+                var pIndex = tk.index();
+                while(cur.t!==stopToken){
+                    pIndex = tk.index();
+                    var o = {};
+                    if(cur.type === 'id'){
+                        o.name = cur.t;
+                        tk.next();
+                    }
+
+                    cur = tk.peek();
+                    if(cur.t === '='){
+                        tk.next();
+                        o.initVal = parseExpressionLst(function(t){return t===','||t===';';});
+                    }
+                    vars.push(o);
+                    cur = tk.peek();
+                    if(cur.t === ','){
+                        tk.next();
+                        cur = tk.peek();
+                    }
+                    checkForward(pIndex);
+                }
+                //res.vars = vars;
+                //tk.next();
+                return vars;
+            }
+
+            function parseGenericity(){
+                tk.next();
+                var res = {};
+                var cur = tk.peek();
+                var pIndex = tk.index();
+                var types = [];
+                var curType;
+                while(cur.t!=='>'){
+                    pIndex = tk.index();
+                    if(!isDataType(cur.type)&&!cur.t==='?'){
+                        throwError('错误应该为类型！')
+                    }
+                    if(cur.t==='?'){
+                        curType = {type:'?',val:'?'};
+                        tk.next();
+                    }else{
+                        curType = parseObjAccess();
+                        var n1 = tk.peek();
+                        if(n1.t === '<'){
+                            //tk.next();
+                            curType = {
+                                type: curType,
+                                isGenericity:true,
+                                genericity: parseGenericity()
+                            };
+                        }
+                    }
+
+                    types.push(curType);
+                    peekAndJump(',')
+                    cur = tk.peek();
+                    checkForward(pIndex);
+                }
+                if(cur.t === '>'){
+                    tk.next();
+                }
+                res.types = types;
+                return res;
+            }
+
+            function parseIf(){
+                var res = {type:'if'};
+                tk.next();
+                res.condition = parseCondition();
+                var cur = tk.peek();
+                if(cur.t === '{'){
+                    res.then = {type: 'block', body:parseBlock()};
+                }else{
+                    res.then = parseStatement();
+                }
+                cur = tk.peek();
+                if(cur.t === 'else'){
+                    tk.next();
+                    cur = tk.peek();
+                    if(cur.t === '{'){
+                        res.else = {type: 'block', body:parseBlock()};
+                    }else {
+                        res.else = parseStatement();
+                    }
+                }
+                return res;
+            }
+
+            function parseCondition(){
+                tk.next();
+                var res = parseExpressionLst(function(t){
+                    return t===')';
+                });
+                tk.next();
+                return res;
+            }
+
+            const opMap = {
+                '||': 5,
+                '&&': 6,
+                '!=': 10,
+                '==': 10,
+                '>=': 11,
+                '>': 11,
+                '<=': 11,
+                '<': 11,
+                '+': 13,
+                '-': 13,
+                '*': 14,
+                '&': 14,
+                '|': 14,
+                '/': 14,
+                '%': 14,
+                '!': 15,
+                '(': 19,
+                ')': 19,
+                '++':20,
+                '--':20,
+                '?':1,
+                ':':1,
+                '%=': 10,
+                '+=': 10,
+                '-=': 10,
+                '*=': 10,
+                '/=': 10,
+            };
+
+            function isOp(t){
+                return opMap[t];
+            }
+            function parseExpressionLst(isEnd){
+                var res = [];
+                var cur = tk.peek();
+                var braceN = 0;
+                var pIndex = tk.index();
+                while(!isEnd(cur.t,cur)||braceN>0){
+                    pIndex = tk.index();
+                    if(isOp(cur.t)){
+                        if(cur.t === '('){
+                            braceN++;
+                        }else if(cur.t === ')'){
+                            braceN--;
+                        }
+                        if(braceN<0){
+                            break;
+                        }
+                        res.push({type:'op',value:cur.t});
+                        tk.next();
+                    }else{
+                        res.push(valExpression());
+                    }
+                    cur = tk.peek();
+                    checkForward(pIndex);
+                }
+                return {type:'expression', lst:res};
+
+            }
+
+            function isObjAccessStart(cur){
+                return cur.type === 'id'||cur.t === 'this'||(cur.type === 'keyword'&& cur.t!=='new');
+            }
+
+            function isPackagedType(t){
+                var keys = ' Integer Byte Short Boolean Char Long Float Double List ArrayList Array String Date ';
+                return keys.indexOf(' '+t+' ') > -1;
+            }
+
+            function valExpression(){
+                var cur = tk.peek();
+                var res;
+                if(cur.type==='num' || cur.type==='string' || cur.type==='boolean'|| cur.type==='null'){;
+                    var n1 = tk.jumpPeek(2)
+                    if(cur.type==='string' && n1.t==='.'){
+                        res = parseObjAccess();
+                    }else{
+                        tk.next();
+                        res = {type:cur.type,value:cur.t};
+                    }
+                }else if(isObjAccessStart(cur)){
+                    res = parseObjAccess();
+                }else if(isPackagedType(cur.t)){
+                    res = parseObjAccess();
+                }else if(cur.t==='new'){
+                    res = parseNew();
+                }
+                return res;
+            }
+
+            function parseCall(o){
+                var res = o||{};
+                res.type = 'call';
+                res.paras = parseParas();
+                return res;
+            }
+
+            function throwError(msg,t){
+                var codes = tk.getCode().split(/\n/g);
+                t = t || tk.peek();
+                throw Error(msg + ' 在第'+t.r+'行 \'' +codes[t.r-1].replace(/^\s+|\s+$/g,'')+'\' , \''+t.t+'\'附近。');
+            }
+
+            function parseParas(){
+                tk.next();
+                var res = [];
+                var cur = tk.peek();
+                var pIndex = tk.index();
+                while(cur.t!==')'){
+                    pIndex = tk.index();
+                    res.push(parsePara());
+                    cur = tk.peek();
+                    if(cur.t === ','){
+                        tk.next();
+                        cur = tk.peek();
+                        if(cur.t===')'){
+                            throwError('代码错误请检查！:参数列表多了一个\',\'。', t);
+                        }
+                    }
+                    checkForward(pIndex);
+                }
+                tk.next();
+                return res;
+            }
+
+            function parsePara(){
+                return parseExpressionLst(function(t, o){ return t===','&&o.type==='punc';});
+            }
+
+            function parseClsBody(){
+                tk.next();
+                var cur = tk.peek();
+                var res = [];
+                var pIndex = tk.index();
+                while(cur.t!=='}'){
+                    pIndex = tk.index();
+                    res.push(parseClsStatement());
+                    cur = tk.peek();
+                    checkForward(pIndex);
+                }
+                if(cur.t==='}'){
+                    tk.next();
+                }
+                return res;
+            }
+
+            function parseNotation(){
+                var  cur = tk.peek();
+                var res = { type: 'notation', name: cur.t };
+                tk.next();
+                cur = tk.peek();
+                if(cur.t === '('){
+                    tk.next();
+                    cur = tk.peek();
+                    while(cur.t!==')'){
+                        tk.next();
+                        cur = tk.peek();
+                    }
+                    if(cur.t===')'){
+                        tk.next();
+                    }
+                }
+                return res;
+            }
+
+            function parse(){
+                var progs = [];
+                var pIndex = tk.index();
+                while(!tk.eof()){
+                    pIndex = tk.index();
+                    var cur = tk.peek();
+                    if(cur.t==='package'){
+                        progs.push(parsePackage());
+                    }else if(cur.type === 'notation'){
+                        progs.push(parseNotation());
+                    }else if(cur.t==='import'){
+                        progs.push(parseImport());
+                    }else if(cur.type==='comment'){
+                        progs.push({type:'comment',content:cur.t,preLine:cur.preLine});
+                        tk.next();
+                    }else if(cur.t==='class'||cur.t==='interface'||cur.t==='enum'){
+                        progs.push(parseClass({accessRisc:''}));
+                    }else if(cur.t==='public' || cur.t==='private' || cur.t==='protected'){
+                        var res = {accessRisc:cur.t};
+                        tk.next();
+                        cur = tk.peek();
+                        var i=2;
+                        while(i>0){
+                            i--;
+                            if(cur.t === 'static'){
+                                res.isStatic = true;
+                                tk.next();
+                            }else if(cur.t === 'abstract'){
+                                res.isAbstract = true;
+                                tk.next();
+                            }
+                            cur = tk.peek();
+                        }
+
+                        cur = tk.peek();
+                        if(cur.t === 'class'||cur.t === 'enum'||cur.t==='interface'){
+                            progs.push(parseClass(res));
+                        }
+                    }else{
+                        tk.next();
+                    }
+                    console.log(cur);
+                    checkForward(pIndex);
+                }
+                console.log(progs);
+                return progs;
+            }
+            return parse;
+        }
+
+
+
+
+
+        function testParser(code){
+            var d = new Date();
+            var parse =new Parser(Tokenizer(inputStream(code)));
+            var ast = parse();
+            //console.log(JSON.stringify(ast));
+            var trans = new tsTransfer();
+            var res = trans(ast);
+            console.log(res);
+            return res;
+        }
+
+
+        function tsTransfer(){
+            function transComment(d,res,l, preType){
+                gData.d = d;
+                if(l.preLine && preType!=='comment'){
+                    res[res.length-1] = res[res.length-1]+' '+l.content;
+                }else{
+                    res.push(genOff(d)+l.content);
+                }
+                gData.d = d;
+            }
+
+            function transCls(d,res, n,type){
+                gData.d = d;
+                var off = genOff(d);
+                res.push(off+'export '+type+' '+ n.name+ transSuper(n)+(n.body?'{':''));
+                if(n.body){
+                    transClsBlock(d,n.body, res);
+                    res.push(off + '}');
+                }
+                gData.d = d;
+            }
+
+            var gData = {
+                ast:[],
+                curClass: '',
+                d:0,// 深度
+            };
+
+            function transImplements(n){
+                if(!n){
+                    return '';
+                }
+                var res = [];
+                each(n.dataTypes,function(e){
+                    res.push(genDataType(e, true));
+                });
+                return ['',n.type,res.join(', '),''].join(' ');
+            }
+            function transSuper(n){
+                return transImplements(n.extends)+  transImplements(n.implements);
+            }
+
+
+
+            function transAttr(d,res, l){
+                gData.d = d;
+                res.push(genOff(d)+(l.accessRisc?l.accessRisc+' ':'')+(l.isStatic?'static ':'')+l.name+genDataType(l)+transAttrInit(l)+';');
+                gData.d = d;
+            }
+
+            function transAttrInit(l){
+                var res = '';
+                if(l.initVal){
+                    res =  ' = '+ transExpression(l.initVal);
+                }
+                return res;
+            }
+
+            function genOff(d){
+                d = d || 0;
+                var res = [];
+                for(var i=0;i<d;i++){
+                    res.push('    ');
+                }
+                return res.join('');
+            }
+            function transFunc(d,res, l){
+                gData.d = d;
+                var off = genOff(d);
+                res.push(off+(l.accessRisc?l.accessRisc+' ':'') +(l.isStatic?'static ':'')+(l.name||l.type)+ transParas(l.paras)+genDataType(l) +(l.body? ' {':';'));
+                if(l.body){
+                    transBlock(d+1,l.body, res);
+                    res.push(off+'}');
+                }
+                gData.d = d;
+            }
+            function transParas(paras){
+                var res = [];
+                each(paras,function(p){
+                    res.push(p.name+genDataType(p));
+                });
+                return '('+res.join(', ')+')';
+            }
+
+            function genGenericity(p){
+                if(p.isGenericity){
+                    var res = [];
+                    each(p.genericity.types,function(p1){
+                        if(p1.type==='objAccess'){
+                            res.push(changeDataType(p1.path));
+                        }else if(p1.isGenericity){
+                            res.push(changeDataType(p1.type.path)+genGenericity(p1));
+                        }else if(p1.type ==='?'){
+                            res.push(changeDataType(p1.val));
+                        }
+                    });
+                    return '<'+res.join(', ')+'>';
+                }
+                return '';
+            }
+            function transExpression(l){
+                var str = [];
+                each(l.lst, function(e){
+                    if(e.type==='objAccess'){
+                        str.push(e.path);
+                    }else if(e.type==='op'){
+                        if(e.value==='=='){
+                            str.push(' === ');
+                        }else if(e.value==='!='){
+                            str.push(' !== ');
+                        }else if(e.value === '!'){
+                            str.push(' !');
+                        }else{
+                            str.push(' '+e.value+' ');
+                        }
+                    }else if(e.type==='null'){
+                        str.push('null');
+                    }else if(e.type==='call'||e.type==='arrayAccess'){
+                        str.push(transCall(0, e));
+                    }else if(e.type === 'new'){
+                        str.push(transNew(0,e));
+                    }else if(e.type === 'string'){
+                        str.push('\''+e.value+'\'');
+                    }else if(e.type === 'expression'){
+                        str.push(transExpression(e));
+                    }else{
+                        str.push(e.value);
+                    }
+                });
+                return str.join('');
+            }
+
+            function genCondition(cs){
+                return '('+transExpression(cs)+')';
+            }
+
+            function genDataType(p, noPreFix){
+                var res = '';
+                if((p.dataType==='List'||p.dataType==='ArrayList')&&p.isGenericity){
+                    res = changeDataType(p.genericity.types.length?p.genericity.types[0].path:'') + '[]'
+                }else{
+                    res = changeDataType(p.dataType)+(p.isArray?'[]':'')+genGenericity(p);
+                }
+                return (noPreFix===true?'':': ')+res;
+            }
+
+            function changeDataType(t){
+                var map = {
+                    int:'number',
+                    String: 'string',
+                    Integer: 'number',
+                    long:'bigint',
+                    double:'number',
+                    '?': '?'
+                }
+                return map[t]||t;
+            }
+
+            function transStatement(d, res,l,preType){
+                gData.d = d;
+                var off = genOff(d);
+                if(l.type==='comment'){
+                    transComment(d,res,l,preType);
+                }else if(l.type==='assign'){
+                    res.push(transAssign(d,l)+';');
+                }else if(l.type==='return'){
+                    res.push(transReturn(d,l)+';');
+                }else if(l.type==='call'){
+                    res.push(transCall(d,l)+';');
+                }else if(l.type==='if'){
+                    transIf(d,res,l, false);
+                }else if(l.type==='varDefine'){
+                    res.push(transVarDefine(d,l)+';');
+                }else if(l.type==='new'){
+                    gData.d = d;
+                    res.push(transNew(d,l)+';');
+                }else if(l.type==='try'){
+                    transTry(d,res,l);
+                }else if(l.type==='null'){
+                    res.push(off+'null'+';');
+                }else if(l.type==='continue'){
+                    res.push(off+'continue'+';');
+                }else if(l.type==='break'){
+                    res.push(off+'break'+';');
+                }else if(l.type==='expression'){
+                    res.push(off+transExpression(l)+';');
+                }else if(l.type==='forEach'){
+                    transForEach(d,res,l);
+                }else if(l.type==='for'){
+                    transFor(d,res,l);
+                }else if(l.type==='while'){
+                    transWhile(d,res,l);
+                }else if(l.type==='arrayAccess'){
+                    res.push(transCall(d,l)+';');
+                }else if(l.type === 'throw'){
+                    res.push(transThrow(d,l)+';');
+                }
+                gData.d = d;
+            }
+
+            function transThrow(d, l){
+                gData.d = d;
+                var str = ['throw '];
+                if(l.exception){
+                    var type = l.exception.type;
+                    var v = l.exception;
+                    if(type === 'objAccess'){
+                        str.push(v.path);
+                    }else if(type==='call'){
+                        str.push(transCall(0,v));
+                    }else if(type === 'expression') {
+                        str.push(transExpression(v));
+                    }else if(type === 'new') {
+                        v.type = 'call';
+                        v.funcName = 'Error'
+                        str.push(transCall(0,v));
+                    }else{
+                        str.push(v.value);
+                        throwError('未知错误');
+                    }
+                }
+                gData.d = d;
+                return (genOff(d)+str.join(''));
+            }
+
+            function transForInit(l){
+                if(!l){
+                    return '';
+                }
+                var d = 0;
+                if(l.type==='assign'){
+                    res = transAssign(d,l);
+                }else if(l.type==='return'){
+                    res = transReturn(d,l);
+                }else if(l.type==='call'){
+                    res = transCall(d,l);
+                }else if(l.type==='varDefine'){
+                    res = transVarDefine(d,l);
+                }else if(l.type==='new'){
+                    res = transNew(d,l);
+                }else if(l.type==='null'){
+                    res = 'null';
+                }else if(l.type==='expression'){
+                    res = transExpression(l);
+                }
+                return res;
+            }
+
+            function transBlock(d,cs, res){
+                gData.d = d;
+                var preType = '';
+                var off = genOff(d);
+                each(cs,function(l){
+                    transStatement(d,res,l,preType);
+                    preType = l.type;
+                });
+                gData.d = d;
+            }
+
+            function transFor(d, res, l){
+                gData.d = d;
+                var off = genOff(d);
+                var s1= l.step1,s2=l.step2;s3=l.step3;
+                var str = [off+'for ('+[transForInit(s1),transExpression(s2),s3?transExpression(s3):''].join(';')+') {'];
+                res.push(str.join(''));
+                transBlock(d+1,l.body,res);
+                res.push(off+'}');
+                gData.d = d;
+            }
+
+            function transForEach(d, res, l){
+                var off = genOff(d);
+                var item = l.item;
+                var str = [off+'for ('+transVarDefine(0, item)+' of '+transExpression({lst:[l.data]})+') {'];
+                res.push(str.join(''));
+                transBlock(d+1,l.body,res);
+                res.push(off+'}');
+            }
+
+            function transTry(d, res, l){
+                gData.d = d;
+                var off = genOff(d);
+                res.push(off+'try {');
+                transBlock(d+1, l.body, res);
+                res.push(off+'}');
+                transCts(d+1, res, l.catch);
+                if(l.finally){
+                    res[res.length - 1] = res[res.length - 1] + ' finally {';
+                    transBlock(d + 1, l.finally.body, res);
+                    res.push(off + '}');
+                }
+                gData.d = d;
+            }
+
+            function transCts(d,res, a) {
+                gData.d = d;
+                var off = genOff(d - 1);
+                each(a, function (e) {
+                    res[res.length - 1] = res[res.length - 1] + ' catch( e ) {';
+                    transBlock(d + 1, e.body, res);
+                    res.push(off + '}');
+                });
+                gData.d = d;
+            }
+
+            function transNew(d, l){
+                var bd = d===0?gData.d:d;
+                console.log(gData);
+                //gData.d = d;
+                console.log(l);
+                var off = genOff(d);
+                var str = ['new ',genDataType(l, true),l.isArray?'[]':'',genCallParas(l.paras)];
+                str = off+str.join('')+transNewNext(l.next);
+                if(l.body){
+                    var b = [''];
+                    transClsBlock(bd+1,l.body, b);
+                    b.push(genOff(bd)+'}');
+                    str = str+' {'+b.join('\r\n');
+                }
+                //gData.d = d;
+                return str;
+            }
+
+            function transNewNext(next){
+                return next ? '.'+transCall(0,next) : '';
+            }
+
+            function transVarDefine(d, l){
+                gData.d = d;
+                console.log(l);
+                var dDatype = genDataType(l);
+                var vars = [];
+                each(l.vars,function(e){
+                    var str = [e.name + dDatype];
+                    if(e.initVal){
+                        str.push(' = ');
+                        if(e.initVal.type === 'expression') {
+                            str.push(transExpression(e.initVal));
+                        }else{
+                            str.push(e.initVal.value);
+                        }
+                    }
+                    vars.push(str.join(''));
+                });
+                gData.d = d;
+                return (genOff(d)+(l.isFinal?'const ':'let ')+vars.join(', '));
+            }
+
+            function transIf(d,res,l,upfold){
+                gData.d = d;
+                var off = genOff(d);
+                if(upfold){
+                    res[res.length-1]= res[res.length-1] +' if '+genCondition(l.condition)+ (l.then.body&&l.then.body.length?' {':'');
+                }else{
+                    res.push(off+'if '+genCondition(l.condition)+ (l.then.body&&l.then.body.length?' {':''));
+                }
+                if(l.then.body&&l.then.body.length){
+                    transBlock(d+1, l.then.body, res);
+                    res.push(off+'}'+(l.else?' else ':''));
+                    if(l.else){
+                        var els = l.else;
+                        if(els&&els.type==='if'){
+                            transIf(d, res,l.else,true);
+                        }else{
+                            res[res.length-1] = res[res.length-1]+'{';
+                            transBlock(d+1, els.body, res);
+                            res.push(off+'}');
+                        }
+                    }
+
+                }
+                gData.d = d;
+            }
+            function transWhile(d,res,l){
+                gData.d = d;
+                var off = genOff(d);
+                res.push(off+'while '+genCondition(l.condition)+ (l.body&&l.body.length?' {':''));
+                if(l.body&&l.body.length){
+                    transBlock(d+1, l.body, res);
+                    res.push(off+'}');
+                }
+                gData.d = d;
+            }
+            function transCall(d, l){
+                gData.d = d;
+                var res = [];
+                var cur = l;
+                while(cur){
+                    if(cur.type === 'arrayAccess'){
+                        res.push(cur.path+'['+transExpression(cur.expression)+']')
+                    }else if(cur.type === 'call'){
+                        res.push(cur.funcName+genCallParas(cur.paras))
+                    }else {
+                        res.push(cur.path);
+                    }
+                    cur = cur.next;
+                }
+                gData.d = d;
+                return (genOff(d)+res.join('.'));
+            }
+
+            function changeFuncName(){
+                var map = {
+                    'StringUtils.equals':'tool.stringEquals'
+                };
+            }
+
+            function genCallParas(paras){
+                var res = [];
+                each(paras,function(p){
+                    if(p.type==='objAccess'){
+                        res.push(p.path);
+                    }else if(p.type === 'call'){
+                        res.push(transCall(0,p));
+                    }else if(p.type === 'expression') {
+                        res.push(transExpression(p));
+                    }else{
+                        res.push(p.value);
+                    }
+                });
+                return '('+res.join(', ')+')';
+            }
+            function transReturn(d,l){
+                gData.d = d;
+                var str = ['return '];
+                if(l.value){
+                    var type = l.value.type;
+                    var v = l.value;
+                    if(type === 'objAccess'){
+                        str.push(v.path);
+                    }else if(type==='call'){
+                        str.push(transCall(0,v));
+                    }else if(type === 'expression') {
+                        str.push(transExpression(v));
+                    }else{
+                        str.push(v.value);
+                    }
+                }
+                gData.d = d;
+                return (genOff(d)+str.join(''));
+            }
+
+            function transAssign(d, n){
+                gData.d = d;
+                var l = n.left;
+                var r = n.right;
+                var str = [];
+                if(l.type==='objAccess'){
+                    str.push(l.path);
+                }
+                str.push(' = ');
+
+                if(r.type==='objAccess'){
+                    str.push(r.path);
+                }else if(r.type === 'expression'){
+                    str.push(transExpression(r));
+                }else{
+                    str.push(r.value);
+                }
+                gData.d = d;
+                return (genOff(d)+str.join(''));
+            }
+
+            function transConstructor(d,res, l){
+                gData.d = d;
+                var off = genOff(d);
+                res.push(off+'constructor'+ transParas(l.paras) +(l.body? ' {':';'));
+                if(l.body){
+                    transBlock(d+1,l.body, res);
+                    res.push(off+'}');
+                }
+                gData.d = d;
+            }
+
+            function transStaticBlock(d, res, l){
+                gData.d = d;
+                var off = genOff(d);
+                res.push(off + 'static ' + (l.body? ' {':';'));
+                if(l.body){
+                    transBlock(d+1,l.body, res);
+                    res.push(off+'}');
+                }
+                gData.d = d;
+            }
+
+            function genEnumInstanceFunc(cs){
+                var constr = null;
+                var res = { isStatic: true ,name: 'newInstance', type: 'func'};
+                for(var i=0,cur =null;i<cs.length;i++){
+                    cur = cs[i];
+                    if(cur.type === 'constructor'){
+                        constr = cur;
+                        break;
+                    }
+                }
+                res.paras = constr.paras;
+                res.dataType = constr.dataType;
+                var body = {};
+                body.type = 'return';
+                body.value = {type:'expression',lst:[{type:'new',dataType:constr.dataType,paras:genCallParasByDefine(res.paras)}]};
+                res.body = [body];
+                return res;
+            }
+
+            function genCallParasByDefine(paras){
+                var res = [];
+                each(paras,function(e){
+                    res.push({type:'objAccess',path:e.name,length:1});
+                });
+                return res;
+            }
+
+
+            function transClsBlock(d, cs, res){
+                gData.d = d;
+                var preType = '';
+                if(gData.classType==='enum'){
+                    cs.push(genEnumInstanceFunc(cs));
+                }
+                each(cs,function(l){
+                    if(l.type==='comment'){
+                        transComment(d+1,res,l,preType);
+                    }else if(l.type==='attr'){
+                        transAttr(d+1,res, l);
+                    }else if(l.type==='func'){
+                        transFunc(d+1,res, l );
+                    }else if(l.type==='constructor'){
+                        transConstructor(d+1,res, l);
+                    }else if(l.type==='class'||l.type==='enum'){
+                        transInnerCls(l);
+                    }else if(l.type==='staticBlock'){
+                        transStaticBlock(d+1,res,l);
+                    }else if(l.type==='enumValue'){
+                        transEnumValue(d+1,res,l);
+                    }
+                });
+                gData.d = d;
+
+            }
+
+
+            function transEnumValue(d, res,l) {
+                gData.d = d;
+                var off = genOff(d);
+                res.push(off +'public static ' + l.name + ' = '+gData.className+'.newInstance'+ genCallParas(l.paras)+';');
+                gData.d = d;
+            }
+
+
+            function transInnerCls(e){
+                gData.ast.push(e);
+            }
+
+            function toTs(ast){
+                gData.ast = ast;
+                var res = [],preType = '';
+                var d = 0;
+                each(ast,function(l){
+                    if(l.type==='class' || l.type==='interface' || l.type==='enum'){
+                        gData.className = l.name;
+                        gData.classType = l.type;
+                    }
+                    if(l.type==='comment'){
+                        transComment(d,res,l,preType);
+                    }else if(l.type==='class'){
+                        transCls(d,res, l,'class');
+                    }else if(l.type==='interface'){
+                        transCls(d,res, l,'interface');
+                    }else if(l.type==='enum'){
+                        transCls(d,res, l,'class');
+                    }
+                });
+                return res.join('\r\n');
+            }
+
+            return toTs;
+
+        }
+
+    </script>
+    </head>
+    <body>
+    时间仓促，简陋版本，目前指改动基本语法，不进行方法名和类名替换 能节点省体力就行<br/>
+    <span style="color:red">翻译完的代码一定要检查一遍!!! 因为可能会漏掉一些东西，简单bean一般没问题。</span><br/><br/>
+    <div style="color:red;">注意事项：<br/>
+        1.翻译简单javaBean一般没问题，service大概率会报错（可以采用3中的分段翻译方式）。<br/>
+        2.复杂类翻译失败的化可以尝试 将其代码分段复制出来放到一个空java类里面翻译。<br/>
+    </div>
+
+    <br/><br/><br/>
+
+        <div id="vue_det">
+            <textarea rows=30 cols=200 id="cls">
+package com.qunar.mobile.eywa.model;
+/**
+ * Created by biao.fan on 2018/9/13.
+ */
+public class CQHotelseqTransModel {
+    private String qunarHotelSeq;// 国内+国际老的seq
+    private String ctripHotelSeq;// 国际、港澳台酒店接入携程数据后新seq
+
+    public String getQunarHotelSeq() {
+        return qunarHotelSeq;
+    }
+
+    public void setQunarHotelSeq(final String qunarHotelSeq) {
+        this.qunarHotelSeq = qunarHotelSeq;
+    }
+
+    public String getCtripHotelSeq() {
+        return ctripHotelSeq;
+    }
+
+    public void setCtripHotelSeq(final String ctripHotelSeq) {
+        this.ctripHotelSeq = ctripHotelSeq;
+    }
+}
+
+            </textarea>
+
+
+            <button onclick="parse();">翻译</button>
+            <textarea rows=30 cols=200 id="cls1"></textarea>
+        </div>
+        <script type="text/javascript">
+            function parse(){
+                var cls = document.getElementById('cls').value;
+                document.getElementById('cls1').value = testParser(cls);
+            }
+        </script>
+    </body>
+    </html>
